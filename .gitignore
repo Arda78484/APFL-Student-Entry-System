@@ -23,3 +23,7 @@ Thumbs.db
 
 # Ignore test specification files
 *.spec
+# Ignore Python compiled files
+*.pyc
+__pycache__/
+*.cpython-*
