@@ -28,3 +28,36 @@ python -m PyInstaller --noconfirm --onefile --windowed \
 - PyInstaller
 
 For more details, refer to the official [PyInstaller documentation](https://pyinstaller.org/).
+## File Structure
+
+Below is the file structure of the project:
+
+```
+student_card_project/
+├── main/
+│   ├── __init__.py
+│   ├── ui/
+│   │   ├── main_window.ui
+│   │   └── student_card.ui
+│   ├── resources/
+│   │   ├── icons/
+│   │   │   ├── add_icon.png
+│   │   │   └── delete_icon.png
+│   │   └── styles.qss
+│   └── logic/
+│       ├── __init__.py
+│       ├── card_logic.py
+│       └── database.py
+├── tests/
+│   ├── test_card_logic.py
+│   └── test_database.py
+├── v1.py
+├── README.md
+└── requirements.txt
+```
+
+- `main/`: Contains the core application logic, UI files, and resources.
+- `tests/`: Contains unit tests for the application.
+- `v1.py`: The main entry point of the application.
+- `requirements.txt`: Lists the Python dependencies for the project.
+- `README.md`: Documentation for the project.
