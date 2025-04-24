@@ -6,11 +6,11 @@ def fix_broken_entry():
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # 1️⃣ Bozuk olanı sil (boşluklu karakterlerle eşleşsin diye LIKE kullanalım)
+    
     cursor.execute("DELETE FROM students WHERE card_id LIKE '%d2%2e%2f%72%'")
     print(f"🗑️ Bozuk giriş silindi. Etkilenen kayıt sayısı: {cursor.rowcount}")
 
-    # 2️⃣ Doğru olanı yeniden ekle
+    
     try:
         cursor.execute('''
         INSERT INTO students (card_id, name_surname, student_no, photo_path)

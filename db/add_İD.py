@@ -1,11 +1,11 @@
 import sqlite3
 import os
 
-# 🔧 Doğru veritabanı ve dosya yolları
+
 db_path = r"C:\Users\kagan\Documents\GitHub\APFL-Student-Entry-System\db\system.db"
 txt_path = r"C:\Users\kagan\Desktop\kart_İD.txt"
 
-# 📥 Kart ID'lerini veritabanına ekle
+
 def import_card_ids(file_path):
     if not os.path.exists(file_path):
         print("❌ TXT dosyası bulunamadı:", file_path)
@@ -16,11 +16,11 @@ def import_card_ids(file_path):
 
     with open(file_path, 'r', encoding='utf-8') as file:
         for line in file:
-            # Kart ID'yi al, boşlukları sil, küçük harfe çevir
+            
             card_id = line.strip().replace(' ', '').lower()
 
             if card_id == '':
-                continue  # boş satır varsa atla
+                continue  
 
             try:
                 cursor.execute('''
@@ -35,6 +35,6 @@ def import_card_ids(file_path):
     conn.close()
     print("🎉 Tüm kart ID’leri başarıyla işlendi.")
 
-# ✅ Çalıştır
+
 if __name__ == "__main__":
     import_card_ids(txt_path)

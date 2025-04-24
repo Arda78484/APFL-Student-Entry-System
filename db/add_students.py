@@ -1,12 +1,12 @@
 import sqlite3
 import os
 
-# 🔧 Veritabanı ve öğrenci bilgilerinin bulunduğu dosya yolları
+
 db_path = r"C:\Users\kagan\Documents\GitHub\APFL-Student-Entry-System\db\system.db"
-name_path = r"C:\Users\kagan\Desktop\name.txt"  # ← senin verdiğin dosya yolu
+name_path = r"C:\Users\kagan\Desktop\name.txt"  
 
 def assign_names():
-    # 1️⃣ name.txt dosyasından ad soyad + öğrenci no oku
+    
     with open(name_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f if line.strip()]
 
@@ -16,7 +16,7 @@ def assign_names():
         name_surname = ' '.join(name_parts)
         students.append((name_surname, student_no))
 
-    # 2️⃣ Veritabanındaki card_id'leri sırayla al
+    
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -25,9 +25,9 @@ def assign_names():
 
     if len(students) > len(card_ids):
         print("❗ Uyarı: name.txt'deki öğrenci sayısı, veritabanındaki kartlardan fazla!")
-        students = students[:len(card_ids)]  # Fazlalığı kes
+        students = students[:len(card_ids)]  
 
-    # 3️⃣ Güncelleme işlemi
+    
     for i, card_id in enumerate(card_ids[:len(students)]):
         name_surname, student_no = students[i]
         cursor.execute('''
