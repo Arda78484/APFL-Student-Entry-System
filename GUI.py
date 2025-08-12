@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Ankara Pursaklar Fen Lisesi - Okul Giriş Çıkış Kart Sistemi
-PySide6 tek dosya
+PySide6 tek dosya uygulama
 
 Gereksinimler:
   pip install PySide6 pandas openpyxl
+Klasörler:
+  data/students.db     (otomatik)
+  photos/<NUMARA>.jpg  (fotoğraflar)
+  logos/images.png     (okul logosu)
 """
 
 import os, sys, sqlite3
@@ -16,7 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
     QSplitter, QListWidget, QListWidgetItem, QLineEdit, QMessageBox, QDialog, QFormLayout,
     QComboBox, QFileDialog, QTableView, QToolButton, QStyle, QHeaderView, QDateEdit,
-    QTimeEdit, QCheckBox, QGridLayout
+    QTimeEdit, QCheckBox, QGridLayout, QTabWidget, QInputDialog
 )
 
 # pandas (opsiyonel)
@@ -29,12 +33,13 @@ APP_TITLE = "Ankara Pursaklar Fen Lisesi - Okul Giriş Çıkış Kart Sistemi"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 PHOTOS_DIR = os.path.join(BASE_DIR, "photos")
+LOGO_PATH = os.path.join(BASE_DIR, "logos", "images.png")
 DB_PATH = os.path.join(DATA_DIR, "students.db")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
-# -------------------- Veritabanı --------------------
+# ===================== Veritabanı =====================
 class Database:
     def __init__(self, path: str):
         self.path = path
@@ -43,7 +48,7 @@ class Database:
     def _ensure(self):
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
-            # Öğrenciler
+            # students
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS students (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,10 +57,11 @@ class Database:
                     last_name TEXT NOT NULL,
                     class TEXT NOT NULL,
                     card_id TEXT UNIQUE,
-                    penalized INTEGER DEFAULT 0
+                    penalized INTEGER DEFAULT 0,
+                    student_type TEXT DEFAULT 'Evci'   -- 'Evci' veya 'Yurtçu'
                 )
             """)
-            # Loglar
+            # logs
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,20 +70,14 @@ class Database:
                     ts TEXT NOT NULL
                 )
             """)
-            # Haftalık çarşı saatleri
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS market_hours (
-                    day INTEGER PRIMARY KEY,           -- 0=Mon ... 6=Sun
-                    start_time TEXT,                   -- 'HH:MM' or NULL => tamamen yasak
-                    end_time TEXT
-                )
-            """)
-            # Migration: penalized kolonu yoksa ekle
+            # migration: ensure columns exist
             cur.execute("PRAGMA table_info(students)")
             cols = {r[1]: r for r in cur.fetchall()}
             if "penalized" not in cols:
                 cur.execute("ALTER TABLE students ADD COLUMN penalized INTEGER DEFAULT 0")
-            # Migration: card_id nullable değilse düzelt
+            if "student_type" not in cols:
+                cur.execute("ALTER TABLE students ADD COLUMN student_type TEXT DEFAULT 'Evci'")
+            # if card_id accidentally NOT NULL, make it NULLable (copy table)
             notnull = cols.get("card_id", (None,)*6)[3] if cols else 0
             if notnull == 1:
                 cur.executescript("""
@@ -89,37 +89,51 @@ class Database:
                         last_name TEXT NOT NULL,
                         class TEXT NOT NULL,
                         card_id TEXT UNIQUE,
-                        penalized INTEGER DEFAULT 0
+                        penalized INTEGER DEFAULT 0,
+                        student_type TEXT DEFAULT 'Evci'
                     );
-                    INSERT INTO students_new(id, number, first_name, last_name, class, card_id, penalized)
-                        SELECT id, number, first_name, last_name, class, NULLIF(card_id,''), COALESCE(penalized,0)
+                    INSERT INTO students_new(id, number, first_name, last_name, class, card_id, penalized, student_type)
+                        SELECT id, number, first_name, last_name, class, NULLIF(card_id,''), COALESCE(penalized,0), COALESCE(student_type,'Evci')
                         FROM students;
                     DROP TABLE students;
                     ALTER TABLE students_new RENAME TO students;
                     COMMIT;
                 """)
-            con.commit()
-            # Varsayılan market_hours kayıtları (tamamen yasak = NULL)
+
+            # market_hours (profil bazlı)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_hours (
+                    profile TEXT,     -- 'Evci'/'Yurtçu'
+                    day INTEGER,      -- 0=Mon .. 6=Sun
+                    start_time TEXT,  -- 'HH:MM' (NULL => tamamen yasak)
+                    end_time   TEXT,
+                    PRIMARY KEY(profile, day)
+                )
+            """)
+            # Seed if empty
             cur.execute("SELECT COUNT(*) FROM market_hours")
-            if cur.fetchone()[0] < 7:
+            if cur.fetchone()[0] < 14:
                 cur.execute("DELETE FROM market_hours")
-                for d in range(7):
-                    cur.execute("INSERT INTO market_hours(day, start_time, end_time) VALUES(?,?,?)", (d, None, None))
-                con.commit()
+                for prof in ("Evci","Yurtçu"):
+                    for d in range(7):
+                        cur.execute("INSERT OR REPLACE INTO market_hours(profile, day, start_time, end_time) VALUES(?,?,?,?)",
+                                    (prof, d, None, None))
+            con.commit()
 
     # ---- Öğrenciler ----
-    def add_student(self, number, first_name, last_name, klass, card_id=None, penalized=0):
+    def add_student(self, number, first_name, last_name, klass, card_id=None, penalized=0, student_type='Evci'):
         with sqlite3.connect(self.path) as con:
             con.execute(
-                "INSERT INTO students(number, first_name, last_name, class, card_id, penalized) VALUES(?,?,?,?,?,?)",
-                (number, first_name, last_name, klass, card_id if card_id else None, int(penalized)),
+                "INSERT INTO students(number, first_name, last_name, class, card_id, penalized, student_type) VALUES(?,?,?,?,?,?,?)",
+                (number, first_name, last_name, klass, card_id if card_id else None, int(penalized), student_type),
             )
             con.commit()
 
     def bulk_add_students(self, rows):
+        # rows: (number, first, last, class, card_id_or_None, penalized, student_type)
         with sqlite3.connect(self.path) as con:
             con.executemany(
-                "INSERT OR REPLACE INTO students(number, first_name, last_name, class, card_id, penalized) VALUES(?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO students(number, first_name, last_name, class, card_id, penalized, student_type) VALUES(?,?,?,?,?,?,?)",
                 rows,
             )
             con.commit()
@@ -127,11 +141,15 @@ class Database:
     def all_students(self):
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
-            cur.execute("SELECT number, first_name, last_name, class, card_id, penalized FROM students ORDER BY number")
+            cur.execute("""
+                SELECT number, first_name, last_name, class, card_id, COALESCE(penalized,0),
+                       COALESCE(student_type,'Evci')
+                FROM students ORDER BY number
+            """)
             return cur.fetchall()
 
     def update_student_field(self, number, field, value):
-        assert field in ("number","first_name","last_name","class","card_id","penalized")
+        assert field in ("number","first_name","last_name","class","card_id","penalized","student_type")
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
             if field == "penalized":
@@ -145,7 +163,10 @@ class Database:
     def find_student_by_card(self, card_id):
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
-            cur.execute("SELECT number, first_name, last_name, COALESCE(penalized,0) FROM students WHERE card_id=?", (card_id,))
+            cur.execute("""
+                SELECT number, first_name, last_name, COALESCE(penalized,0), COALESCE(student_type,'Evci')
+                FROM students WHERE card_id=?
+            """, (card_id,))
             return cur.fetchone()
 
     def get_penalized(self, number):
@@ -162,23 +183,17 @@ class Database:
             con.execute("INSERT INTO logs(student_number, action, ts) VALUES(?,?,?)", (student_number, action, ts))
             con.commit()
         return ts
-    
+
     def last_action_for_student(self, student_number, include_blocked=False):
-        """Öğrencinin son işlemi.
-        include_blocked=False iken 'Yasak' kayıtlarını yok sayar (sadece Giriş/Çıkış bakar)."""
+        """Öğrencinin son işlemi. include_blocked=False -> 'Yasak' yok sayılır."""
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
             if include_blocked:
-                cur.execute(
-                    "SELECT action FROM logs WHERE student_number=? ORDER BY ts DESC LIMIT 1",
-                    (student_number,)
-                )
+                cur.execute("SELECT action FROM logs WHERE student_number=? ORDER BY ts DESC LIMIT 1", (student_number,))
             else:
-                cur.execute(
-                    "SELECT action FROM logs WHERE student_number=? AND action IN ('Giriş','Çıkış') "
-                    "ORDER BY ts DESC LIMIT 1",
-                    (student_number,)
-                )
+                cur.execute("""SELECT action FROM logs
+                               WHERE student_number=? AND action IN ('Giriş','Çıkış')
+                               ORDER BY ts DESC LIMIT 1""", (student_number,))
             row = cur.fetchone()
             return row[0] if row else None
 
@@ -200,21 +215,21 @@ class Database:
             cur.execute("SELECT student_number, action, ts FROM logs WHERE substr(ts,1,10)=? ORDER BY ts ASC", (date_str,))
             return cur.fetchall()
 
-    # ---- Market hours ----
-    def get_day_interval(self, weekday):  # 0=Mon..6=Sun
+    # ---- Market hours (profil bazlı) ----
+    def get_day_interval(self, profile, weekday):  # 0=Mon..6=Sun
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
-            cur.execute("SELECT start_time, end_time FROM market_hours WHERE day=?", (weekday,))
+            cur.execute("SELECT start_time, end_time FROM market_hours WHERE profile=? AND day=?", (profile, weekday))
             row = cur.fetchone()
             return row if row else (None, None)
 
-    def set_day_interval(self, weekday, start_str_or_none, end_str_or_none):
+    def set_day_interval(self, profile, weekday, start_str_or_none, end_str_or_none):
         with sqlite3.connect(self.path) as con:
-            con.execute("UPDATE market_hours SET start_time=?, end_time=? WHERE day=?",
-                        (start_str_or_none, end_str_or_none, weekday))
+            con.execute("INSERT OR REPLACE INTO market_hours(profile, day, start_time, end_time) VALUES(?,?,?,?)",
+                        (profile, weekday, start_str_or_none, end_str_or_none))
             con.commit()
 
-# -------------------- Görsel öğeler --------------------
+# ===================== Görsel Öğeler =====================
 class PersonItem(QWidget):
     def __init__(self, number, name_surname, timestamp, large=False, highlight_red=False):
         super().__init__()
@@ -240,7 +255,7 @@ class PersonItem(QWidget):
 
         h.addWidget(pic); h.addLayout(v)
 
-# -------------------- Öğrenci Ekle --------------------
+# ===================== Öğrenci Ekle =====================
 class AddStudentDialog(QDialog):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -254,12 +269,14 @@ class AddStudentDialog(QDialog):
         self.cb_class  = QComboBox()
         classes = [f"{g}/{s}" for g in ("9","10","11","12") for s in ("A","B","C","D","E")]
         self.cb_class.addItems(classes)
+        self.cb_type   = QComboBox(); self.cb_type.addItems(["Evci","Yurtçu"])
         self.le_card   = QLineEdit()  # opsiyonel
 
         form.addRow("Numarası (Unique)", self.le_number)
         form.addRow("Adı", self.le_first)
         form.addRow("Soyadı", self.le_last)
         form.addRow("Sınıfı", self.cb_class)
+        form.addRow("Tipi", self.cb_type)     # Evci/Yurtçu
         form.addRow("Kart ID (opsiyonel)", self.le_card)
 
         # RFID Enter'ı yut
@@ -283,11 +300,12 @@ class AddStudentDialog(QDialog):
             first  = self.le_first.text().strip()
             last   = self.le_last.text().strip()
             klass  = self.cb_class.currentText()
+            stype  = self.cb_type.currentText()
             card   = self.le_card.text().strip()
-            if not all([number, first, last, klass]):
-                QMessageBox.warning(self, "Eksik", "Numara, Ad, Soyad, Sınıf zorunlu.")
+            if not all([number, first, last, klass, stype]):
+                QMessageBox.warning(self, "Eksik", "Numara, Ad, Soyad, Sınıf, Tip zorunlu.")
                 return
-            self.db.add_student(number, first, last, klass, card if card else None, 0)
+            self.db.add_student(number, first, last, klass, card if card else None, 0, stype)
             QMessageBox.information(self, "Tamam", "Öğrenci eklendi.")
             self.accept()
         except sqlite3.IntegrityError as e:
@@ -295,9 +313,9 @@ class AddStudentDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Hata", str(e))
 
-# -------------------- Öğrenci Menüsü --------------------
+# ===================== Öğrenci Menüsü =====================
 class StudentsModel(QStandardItemModel):
-    HEADERS = ["Numara","Ad","Soyad","Sınıf","Kart ID","Cezalı"]
+    HEADERS = ["Numara","Ad","Soyad","Sınıf","Kart ID","Cezalı","Tip"]
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
@@ -307,7 +325,7 @@ class StudentsModel(QStandardItemModel):
 
     def _load(self):
         self.setRowCount(0)
-        for number, first, last, klass, card, penalized in self.db.all_students():
+        for number, first, last, klass, card, penalized, stype in self.db.all_students():
             row = [
                 QStandardItem(str(number)),
                 QStandardItem(first),
@@ -315,8 +333,11 @@ class StudentsModel(QStandardItemModel):
                 QStandardItem(klass),
                 QStandardItem("" if card is None else str(card)),
                 QStandardItem(""),
+                QStandardItem(stype or "Evci"),
             ]
-            for i, it in enumerate(row): it.setEditable(True if i!=5 else False)
+            for i, it in enumerate(row):
+                it.setEditable(True if i != 5 else False)
+            # checkbox (Cezalı)
             chk = row[5]; chk.setCheckable(True)
             chk.setCheckState(Qt.Checked if int(penalized) else Qt.Unchecked)
             self.appendRow(row)
@@ -379,6 +400,12 @@ class StudentMenuDialog(QDialog):
                 self.db.update_student_field(number, "class", item.text().strip())
             elif col == 4:
                 self.db.update_student_field(number, "card_id", item.text().strip())
+            elif col == 6:
+                val = item.text().strip()
+                if val not in ("Evci","Yurtçu"):
+                    QMessageBox.warning(self, "Uyarı", "Tip sadece 'Evci' veya 'Yurtçu' olabilir.")
+                    self.model._load(); return
+                self.db.update_student_field(number, "student_type", val)
         except sqlite3.IntegrityError as e:
             QMessageBox.critical(self, "Hata", f"Kayıt güncellenemedi: {e}")
             self.model._load()
@@ -412,96 +439,170 @@ class StudentMenuDialog(QDialog):
                 card = str(r["KartID"]).strip() if "KartID" in df.columns and not pd.isna(r["KartID"]) else None
                 penal = r["Cezalı"] if "Cezalı" in df.columns else 0
                 penal = 1 if str(penal).strip().lower() in ("1","true","evet","yes","✓","x") else 0
-                rows.append((num, first, last, klass, card, penal))
+                stype = str(r["Tip"]).strip() if "Tip" in df.columns and not pd.isna(r["Tip"]) else "Evci"
+                if stype not in ("Evci","Yurtçu"): stype = "Evci"
+                rows.append((num, first, last, klass, card, penal, stype))
             self.db.bulk_add_students(rows)
             QMessageBox.information(self, "Tamam", f"{len(rows)} öğrenci içe aktarıldı.")
             self.model._load()
         except Exception as e:
             QMessageBox.critical(self, "Hata", str(e))
 
-# -------------------- Market Hours Dialog --------------------
+# ===================== Market Hours Dialog (Evci/Yurtçu) =====================
 DAYS_TR = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
 
 class MarketHoursDialog(QDialog):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self.db = db
-        self.setWindowTitle("Çarşı Saatlerini Düzenle")
-        self.resize(520, 380)
+        self.setWindowTitle("Çarşı Saatlerini Düzenle (Evci / Yurtçu)")
+        self.resize(640, 420)
         v = QVBoxLayout(self)
 
-        grid = QGridLayout()
-        self.enabled_checks = []
-        self.start_edits = []
-        self.end_edits = []
-        for i, day in enumerate(DAYS_TR):
-            lbl = QLabel(day)
-            chk = QCheckBox("İzinli")
-            st = QTimeEdit(); st.setDisplayFormat("HH:mm")
-            en = QTimeEdit(); en.setDisplayFormat("HH:mm")
-            grid.addWidget(lbl, i, 0)
-            grid.addWidget(chk, i, 1)
-            grid.addWidget(QLabel("Başlangıç"), i, 2)
-            grid.addWidget(st, i, 3)
-            grid.addWidget(QLabel("Bitiş"), i, 4)
-            grid.addWidget(en, i, 5)
-            self.enabled_checks.append(chk)
-            self.start_edits.append(st)
-            self.end_edits.append(en)
-            # yükle
-            s, e = self.db.get_day_interval(i)
-            if s and e:
-                hh, mm = map(int, s.split(":")); st.setTime(time(hh, mm))
-                hh, mm = map(int, e.split(":")); en.setTime(time(hh, mm))
-                chk.setChecked(True)
-            else:
-                chk.setChecked(False)
-                st.setEnabled(False); en.setEnabled(False)
-            chk.toggled.connect(lambda on, st=st, en=en: (st.setEnabled(on), en.setEnabled(on)))
-        v.addLayout(grid)
+        self.tabs = QTabWidget()
+        self._tab_data = {}  # profile -> (checks, starts, ends)
+
+        for profile in ("Evci","Yurtçu"):
+            w = QWidget(); g = QGridLayout(w)
+            checks, starts, ends = [], [], []
+            for i, day in enumerate(DAYS_TR):
+                lbl = QLabel(day)
+                chk = QCheckBox("İzinli")
+                st = QTimeEdit(); st.setDisplayFormat("HH:mm")
+                en = QTimeEdit(); en.setDisplayFormat("HH:mm")
+                g.addWidget(lbl, i, 0)
+                g.addWidget(chk, i, 1)
+                g.addWidget(QLabel("Başlangıç"), i, 2); g.addWidget(st, i, 3)
+                g.addWidget(QLabel("Bitiş"), i, 4);     g.addWidget(en, i, 5)
+                s, e = self.db.get_day_interval(profile, i)
+                if s and e:
+                    hh, mm = map(int, s.split(":")); st.setTime(time(hh, mm))
+                    hh, mm = map(int, e.split(":")); en.setTime(time(hh, mm))
+                    chk.setChecked(True)
+                else:
+                    chk.setChecked(False); st.setEnabled(False); en.setEnabled(False)
+                chk.toggled.connect(lambda on, st=st, en=en: (st.setEnabled(on), en.setEnabled(on)))
+                checks.append(chk); starts.append(st); ends.append(en)
+            self.tabs.addTab(w, profile)
+            self._tab_data[profile] = (checks, starts, ends)
+        v.addWidget(self.tabs)
 
         btns = QHBoxLayout()
-        btn_cancel = QPushButton("Vazgeç")
-        btn_save = QPushButton("Kaydet")
-        btn_cancel.clicked.connect(self.reject)
-        btn_save.clicked.connect(self.save)
-        btns.addStretch(1); btns.addWidget(btn_cancel); btns.addWidget(btn_save)
+        b_cancel = QPushButton("Vazgeç"); b_save = QPushButton("Kaydet")
+        b_cancel.clicked.connect(self.reject); b_save.clicked.connect(self.save)
+        btns.addStretch(1); btns.addWidget(b_cancel); btns.addWidget(b_save)
         v.addLayout(btns)
 
     def save(self):
-        # Tek aralık/gün kuralı – kapalıysa NULL yaz
         try:
-            for d in range(7):
-                if self.enabled_checks[d].isChecked():
-                    st = self.start_edits[d].time(); en = self.end_edits[d].time()
-                    s = f"{st.hour():02d}:{st.minute():02d}"
-                    e = f"{en.hour():02d}:{en.minute():02d}"
-                    self.db.set_day_interval(d, s, e)
-                else:
-                    self.db.set_day_interval(d, None, None)  # tamamen yasak
+            for profile, (checks, starts, ends) in self._tab_data.items():
+                for d in range(7):
+                    if checks[d].isChecked():
+                        st = starts[d].time(); en = ends[d].time()
+                        s = f"{st.hour():02d}:{st.minute():02d}"
+                        e = f"{en.hour():02d}:{en.minute():02d}"
+                        self.db.set_day_interval(profile, d, s, e)
+                    else:
+                        self.db.set_day_interval(profile, d, None, None)  # tamamen yasak
             QMessageBox.information(self, "Kaydedildi", "Çarşı saatleri güncellendi.")
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Hata", str(e))
 
-# -------------------- Loglar Dialogu --------------------
+# ===================== Gelişmiş Excel Dialog =====================
+class AdvancedExportDialog(QDialog):
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Excel Oluştur (Gelişmiş)")
+        self.resize(420, 240)
+        v = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.cb_type = QComboBox(); self.cb_type.addItems(["Tümü","Evci","Yurtçu"])
+        self.cb_only_blocked = QCheckBox("Sadece Yasaklı İşlemler")
+        self.start_date = QDateEdit(); self.start_date.setCalendarPopup(True); self.start_date.setDate(QDate.currentDate())
+        self.end_date   = QDateEdit(); self.end_date.setCalendarPopup(True);   self.end_date.setDate(QDate.currentDate())
+        form.addRow("Tip:", self.cb_type)
+        form.addRow("Başlangıç Tarihi:", self.start_date)
+        form.addRow("Bitiş Tarihi:", self.end_date)
+        form.addRow(self.cb_only_blocked)
+        v.addLayout(form)
+
+        btns = QHBoxLayout()
+        b_cancel = QPushButton("Vazgeç"); b_ok = QPushButton("Excel Oluştur")
+        b_cancel.clicked.connect(self.reject); b_ok.clicked.connect(self.export_excel)
+        btns.addStretch(1); btns.addWidget(b_cancel); btns.addWidget(b_ok)
+        v.addLayout(btns)
+
+    def export_excel(self):
+        if pd is None:
+            QMessageBox.critical(self, "Pandas Yok", "Excel dışa aktarma için pandas/openpyxl kurulmalı.")
+            return
+        d1 = self.start_date.date().toString("yyyy-MM-dd")
+        d2 = self.end_date.date().toString("yyyy-MM-dd")
+        only_blocked = self.cb_only_blocked.isChecked()
+        stype = self.cb_type.currentText()
+
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            q = ("SELECT l.student_number, l.action, l.ts, COALESCE(s.student_type,'Evci') as stype "
+                 "FROM logs l JOIN students s ON s.number=l.student_number "
+                 "WHERE substr(l.ts,1,10) BETWEEN ? AND ? ")
+            params = [d1, d2]
+            if only_blocked:
+                q += "AND l.action='Yasak' "
+            if stype in ("Evci","Yurtçu"):
+                q += "AND COALESCE(s.student_type,'Evci')=? "
+                params.append(stype)
+            q += "ORDER BY l.ts ASC"
+            cur.execute(q, params)
+            rows = cur.fetchall()
+
+        if not rows:
+            QMessageBox.information(self, "Kayıt Yok", "Seçtiğin filtrelerle kayıt bulunamadı.")
+            return
+
+        df = pd.DataFrame(rows, columns=["Numara","İşlem","Tarih-Saat","Tip"])
+        defname = f"rapor_{d1}_{d2}"
+        if only_blocked: defname += "_yasakli"
+        if stype in ("Evci","Yurtçu"): defname += f"_{stype.lower()}"
+        defname += ".xlsx"
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Excel olarak kaydet", defname, "Excel (*.xlsx)")
+        if not save_path: return
+        try:
+            df.to_excel(save_path, index=False)
+            QMessageBox.information(self, "Tamam", f"Excel kaydedildi:\n{save_path}")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", str(e))
+
+# ===================== Giriş-Çıkış Menüsü =====================
 class LogsDialog(QDialog):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self.db = db
         self.setWindowTitle("Giriş-Çıkış Menüsü")
-        self.resize(900, 580)
+        self.resize(980, 600)
 
         v = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addStretch(1)
         self.date_edit = QDateEdit(); self.date_edit.setCalendarPopup(True); self.date_edit.setDate(QDate.currentDate())
-        self.btn_export = QPushButton("Seçilen Tarih İçin Excel İndir")
-        self.btn_hours  = QPushButton("Çarşı Saatlerini Düzenle")
-        self.btn_export.clicked.connect(self.export_excel)
-        self.btn_hours.clicked.connect(self.open_hours)
         self.cb_blocked_only = QCheckBox("Sadece Yasaklılar")
-        top.addWidget(QLabel("Tarih:")); top.addWidget(self.date_edit); top.addWidget(self.cb_blocked_only); top.addWidget(self.btn_export); top.addWidget(self.btn_hours)
+        self.btn_export = QPushButton("Seçilen Tarih İçin Excel İndir")
+        self.btn_export.clicked.connect(self.export_excel)
+        self.btn_hours  = QPushButton("Çarşı Saatlerini Düzenle")
+        self.btn_hours.clicked.connect(self.open_hours)
+        self.btn_export_adv = QPushButton("Excel Oluştur (Gelişmiş)")
+        self.btn_export_adv.clicked.connect(self.open_export_advanced)
+
+        top.addWidget(QLabel("Tarih:")); top.addWidget(self.date_edit)
+        top.addWidget(self.cb_blocked_only)
+        top.addWidget(self.btn_export)
+        top.addWidget(self.btn_hours)
+        top.addWidget(self.btn_export_adv)
 
         self.table = QTableView()
         self.table.setSortingEnabled(True)
@@ -514,8 +615,7 @@ class LogsDialog(QDialog):
     def refresh_table(self):
         model = QStandardItemModel(); model.setHorizontalHeaderLabels(["Numara","İşlem","Tarih-Saat"])
         for number, action, ts in self.db.all_logs():
-            r = [QStandardItem(number), QStandardItem(action), QStandardItem(ts)]
-            model.appendRow(r)
+            model.appendRow([QStandardItem(number), QStandardItem(action), QStandardItem(ts)])
         self.table.setModel(model)
 
     def export_excel(self):
@@ -530,11 +630,9 @@ class LogsDialog(QDialog):
             QMessageBox.information(self, "Kayıt Yok",
                                     f"{date_str} tarihinde {'yasaklı ' if self.cb_blocked_only.isChecked() else ''}kayıt bulunamadı.")
             return
-
-        df = pd.DataFrame(rows, columns=["Numara", "İşlem", "Tarih-Saat"])
-        default_name = f"rapor_{date_str}{'_yasakli' if self.cb_blocked_only.isChecked() else ''}.xlsx"
-        save_path, _ = QFileDialog.getSaveFileName(self, "Excel olarak kaydet", default_name, "Excel (*.xlsx)")
-
+        df = pd.DataFrame(rows, columns=["Numara","İşlem","Tarih-Saat"])
+        defname = f"rapor_{date_str}{'_yasakli' if self.cb_blocked_only.isChecked() else ''}.xlsx"
+        save_path, _ = QFileDialog.getSaveFileName(self, "Excel olarak kaydet", defname, "Excel (*.xlsx)")
         if save_path:
             try:
                 df.to_excel(save_path, index=False)
@@ -547,7 +645,10 @@ class LogsDialog(QDialog):
         if dlg.exec():
             QMessageBox.information(self, "Bilgi", "Yeni saatler uygulanmaya başladı.")
 
-# -------------------- Ana Pencere --------------------
+    def open_export_advanced(self):
+        AdvancedExportDialog(self.db, self).exec()
+
+# ===================== Ana Pencere =====================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -559,69 +660,56 @@ class MainWindow(QMainWindow):
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        # Üst
+        # ---------- Üst: Logo + büyük başlık + menüler ----------
         header = QHBoxLayout()
 
-        # Sol: Logo + büyük başlık
         left = QHBoxLayout()
         logo_lbl = QLabel()
-        # logos/images.png yolu (proje köküne göre)
-        logo_path = os.path.join(BASE_DIR, "logos", "images.png")
-        pm = QPixmap(logo_path)
+        pm = QPixmap(LOGO_PATH)
         if not pm.isNull():
-            pm = pm.scaledToHeight(64, Qt.SmoothTransformation)  # Logoyu 64px yüksekliğe ölçekle
+            pm = pm.scaledToHeight(64, Qt.SmoothTransformation)
             logo_lbl.setPixmap(pm)
             logo_lbl.setFixedHeight(64)
         else:
-            # Logo bulunamazsa boş yer tutsun
             logo_lbl.setFixedSize(64, 64)
 
         title = QLabel(APP_TITLE)
         title.setStyleSheet("font-size:26px; font-weight:800;")
-
-        left.addWidget(logo_lbl)
-        left.addSpacing(12)
-        left.addWidget(title)
+        left.addWidget(logo_lbl); left.addSpacing(12); left.addWidget(title)
 
         header.addLayout(left)
         header.addStretch(1)
 
-        # Sağ: menü butonları
         btn_students = QPushButton("Öğrenci Menüsü")
         btn_logs = QPushButton("Giriş-Çıkış Menüsü")
-        btn_students.clicked.connect(self.open_students)
-        btn_logs.clicked.connect(self.open_logs)
+        btn_students.clicked.connect(self.open_students); btn_logs.clicked.connect(self.open_logs)
+        header.addWidget(btn_students); header.addWidget(btn_logs)
 
-        header.addWidget(btn_students)
-        header.addWidget(btn_logs)
-
-        # --- header'ı yerleştir ---
         root.addLayout(header)
-        root.addSpacing(12)  # Başlıkla listeler arasında boşluk, log’ları aşağı iter
+        root.addSpacing(12)  # başlıkla listeler arası boşluk
 
-
-        # Orta: üç liste (Giriş / Çıkış / Yasak)
+        # ---------- Orta: üç liste ----------
         splitter = QSplitter(Qt.Horizontal)
         # Sol: Giriş
         left = QVBoxLayout(); leftw = QWidget(); leftw.setLayout(left)
-        ltitle = QLabel("Giren Öğrenciler"); ltitle.setStyleSheet("font-weight:600;")
+        ltitle = QLabel("Giren Öğrenciler (Son 10)"); ltitle.setStyleSheet("font-weight:600;")
         self.list_in = QListWidget()
         left.addWidget(ltitle); left.addWidget(self.list_in)
         # Orta: Çıkış
         mid = QVBoxLayout(); midw = QWidget(); midw.setLayout(mid)
-        mtitle = QLabel("Çıkan Öğrenciler"); mtitle.setStyleSheet("font-weight:600;")
+        mtitle = QLabel("Çıkan Öğrenciler (Son 10)"); mtitle.setStyleSheet("font-weight:600;")
         self.list_out = QListWidget()
         mid.addWidget(mtitle); mid.addWidget(self.list_out)
-        # Sağ: Yasak
+        # Sağ: Yasaklı
         right = QVBoxLayout(); rightw = QWidget(); rightw.setLayout(right)
-        rtitle = QLabel("Yasaklı Denemeler"); rtitle.setStyleSheet("font-weight:600;")
+        rtitle = QLabel("Yasaklı Denemeler (Son 10)"); rtitle.setStyleSheet("font-weight:600;")
         self.list_blocked = QListWidget()
         right.addWidget(rtitle); right.addWidget(self.list_blocked)
 
         splitter.addWidget(leftw); splitter.addWidget(midw); splitter.addWidget(rightw)
         splitter.setSizes([1,1,1])
 
-        # RFID input
+        # ---------- Alt: RFID giriş ----------
         self.rfid_input = QLineEdit(); self.rfid_input.setPlaceholderText("Kartı okutun…")
         self.rfid_input.returnPressed.connect(self.handle_card)
         self.rfid_input.setClearButtonEnabled(True); self.rfid_input.setMaximumWidth(360)
@@ -629,19 +717,20 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout()
         bottom.addWidget(QLabel("Kart ID:")); bottom.addWidget(self.rfid_input); bottom.addStretch(1)
 
-        root.addLayout(header); root.addWidget(splitter); root.addLayout(bottom)
+        root.addWidget(splitter)
+        root.addLayout(bottom)
 
         self.refresh_lists()
         self._focus_timer = QTimer(self); self._focus_timer.timeout.connect(lambda: self.rfid_input.setFocus())
         self._focus_timer.start(2000); self.rfid_input.setFocus()
 
+    # ----- Listeleri yenile -----
     def refresh_lists(self):
         self.list_in.clear(); self.list_out.clear(); self.list_blocked.clear()
         # Girişler
         for idx, (number, action, ts) in enumerate(self.db.last_n_logs("Giriş", 10)):
             name = self._name_of(number)
             item = QListWidgetItem()
-            # Kırmızı çerçeve sadece son okutulan ve cezalıysa
             highlight = (self._last_scanned == (number, "Giriş")) and (idx == 0) and self.db.get_penalized(number)
             widget = PersonItem(number, name, ts, large=(idx==0), highlight_red=bool(highlight))
             item.setSizeHint(widget.sizeHint())
@@ -654,7 +743,7 @@ class MainWindow(QMainWindow):
             widget = PersonItem(number, name, ts, large=(idx==0), highlight_red=bool(highlight))
             item.setSizeHint(widget.sizeHint())
             self.list_out.addItem(item); self.list_out.setItemWidget(item, widget)
-        # Yasaklılar (her zaman kırmızı vurgulanır - sadece son okutulan büyük satırda çerçeve gösteriyoruz)
+        # Yasaklılar (son yasaklı büyük satır kırmızı)
         for idx, (number, action, ts) in enumerate(self.db.last_n_logs("Yasak", 10)):
             name = self._name_of(number)
             item = QListWidgetItem()
@@ -677,20 +766,18 @@ class MainWindow(QMainWindow):
         if n > 1:
             QTimer.singleShot(interval_ms, lambda: self._beep_n_times(n-1, interval_ms))
 
-    def _is_within_market_hours(self):
+    def _is_within_market_hours(self, profile):
         now = datetime.now()
-        wd = now.weekday()  # 0=Mon..6=Sun
-        st, en = self.db.get_day_interval(wd)
+        wd = now.weekday()  # 0..6
+        st, en = self.db.get_day_interval(profile, wd)
         if not st or not en:
             return False
-        h1, m1 = map(int, st.split(":"))
-        h2, m2 = map(int, en.split(":"))
-        t1 = time(h1, m1); t2 = time(h2, m2)
-        now_t = now.time()
+        h1, m1 = map(int, st.split(":")); h2, m2 = map(int, en.split(":"))
+        t1 = time(h1, m1); t2 = time(h2, m2); now_t = now.time()
         if t1 <= t2:
             return t1 <= now_t <= t2
         else:
-            # Gece taşan aralık (örn 22:00-02:00) – kapsama: now_t >= t1 or now_t <= t2
+            # gece taşması (22:00-02:00 gibi)
             return (now_t >= t1) or (now_t <= t2)
 
     def handle_card(self):
@@ -698,10 +785,9 @@ class MainWindow(QMainWindow):
         if not card: return
         stu = self.db.find_student_by_card(card)
         if not stu:
-            # Kart tanımsızsa karta numara ata
-            from PySide6.QtWidgets import QInputDialog
+            # Kart tanımsız: öğrenci numarasına ata
             num, ok = QInputDialog.getText(self, "Kart Atama", "Bu kart tanımsız.\nKartı atamak için öğrenci numarasını girin:")
-            num = num.strip()
+            num = (num or "").strip()
             if not (ok and num): return
             try:
                 self.db.update_student_field(num, "card_id", card)
@@ -710,13 +796,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Hata", f"Kart atanamadı: {e}")
             return
 
-        number, first, last, penalized = stu
+        number, first, last, penalized, stype = stu
 
-        # Çarşı saat kontrolü
-        within = self._is_within_market_hours()
-
+        # Çarşı saat kontrolü (profil: Evci/Yurtçu)
+        within = self._is_within_market_hours(stype)
         if not within:
-            # Saat dışı => Yasak
             ts = self.db.add_log(number, "Yasak")
             self._last_scanned = (number, "Yasak")
             if int(penalized):
@@ -736,14 +820,14 @@ class MainWindow(QMainWindow):
         self.refresh_lists()
 
     def open_students(self):
-        dlg = StudentMenuDialog(self.db, self); dlg.exec()
+        StudentMenuDialog(self.db, self).exec()
         self.refresh_lists()
 
     def open_logs(self):
-        dlg = LogsDialog(self.db, self); dlg.exec()
+        LogsDialog(self.db, self).exec()
         self.refresh_lists()
 
-# -------------------- Çalıştır --------------------
+# ===================== Çalıştır =====================
 def main():
     app = QApplication(sys.argv)
     w = MainWindow(); w.show()
