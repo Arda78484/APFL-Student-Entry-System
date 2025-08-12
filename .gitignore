@@ -1,29 +1,10 @@
-# Ignore node_modules folder
-node_modules/
-
-# Ignore environment variables
-.env
-
-# Ignore build outputs
-dist/
-build/
-
-# Ignore logs
-*.log
-logs/
-
-# Ignore system files
-.DS_Store
-Thumbs.db
-
-# Ignore IDE specific files
-.vscode/
-.idea/
-*.iml
-
-# Ignore test specification files
-*.spec
-# Ignore Python compiled files
-*.pyc
+.venv
 __pycache__/
-*.cpython-*
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.log
+*.csv
+*.xlsx
