@@ -500,7 +500,8 @@ class LogsDialog(QDialog):
         self.btn_hours  = QPushButton("Çarşı Saatlerini Düzenle")
         self.btn_export.clicked.connect(self.export_excel)
         self.btn_hours.clicked.connect(self.open_hours)
-        top.addWidget(QLabel("Tarih:")); top.addWidget(self.date_edit); top.addWidget(self.btn_export); top.addWidget(self.btn_hours)
+        self.cb_blocked_only = QCheckBox("Sadece Yasaklılar")
+        top.addWidget(QLabel("Tarih:")); top.addWidget(self.date_edit); top.addWidget(self.cb_blocked_only); top.addWidget(self.btn_export); top.addWidget(self.btn_hours)
 
         self.table = QTableView()
         self.table.setSortingEnabled(True)
@@ -523,11 +524,17 @@ class LogsDialog(QDialog):
             return
         date_str = self.date_edit.date().toString("yyyy-MM-dd")
         rows = self.db.logs_on_date(date_str)
+        if self.cb_blocked_only.isChecked():
+            rows = [r for r in rows if r[1] == "Yasak"]
         if not rows:
-            QMessageBox.information(self, "Kayıt Yok", f"{date_str} tarihinde kayıt bulunamadı.")
+            QMessageBox.information(self, "Kayıt Yok",
+                                    f"{date_str} tarihinde {'yasaklı ' if self.cb_blocked_only.isChecked() else ''}kayıt bulunamadı.")
             return
-        df = pd.DataFrame(rows, columns=["Numara","İşlem","Tarih-Saat"])
-        save_path, _ = QFileDialog.getSaveFileName(self, "Excel olarak kaydet", f"rapor_{date_str}.xlsx", "Excel (*.xlsx)")
+
+        df = pd.DataFrame(rows, columns=["Numara", "İşlem", "Tarih-Saat"])
+        default_name = f"rapor_{date_str}{'_yasakli' if self.cb_blocked_only.isChecked() else ''}.xlsx"
+        save_path, _ = QFileDialog.getSaveFileName(self, "Excel olarak kaydet", default_name, "Excel (*.xlsx)")
+
         if save_path:
             try:
                 df.to_excel(save_path, index=False)
@@ -554,28 +561,60 @@ class MainWindow(QMainWindow):
 
         # Üst
         header = QHBoxLayout()
-        title = QLabel(APP_TITLE); title.setStyleSheet("font-size:18px;font-weight:700;")
-        header.addWidget(title); header.addStretch(1)
+
+        # Sol: Logo + büyük başlık
+        left = QHBoxLayout()
+        logo_lbl = QLabel()
+        # logos/images.png yolu (proje köküne göre)
+        logo_path = os.path.join(BASE_DIR, "logos", "images.png")
+        pm = QPixmap(logo_path)
+        if not pm.isNull():
+            pm = pm.scaledToHeight(64, Qt.SmoothTransformation)  # Logoyu 64px yüksekliğe ölçekle
+            logo_lbl.setPixmap(pm)
+            logo_lbl.setFixedHeight(64)
+        else:
+            # Logo bulunamazsa boş yer tutsun
+            logo_lbl.setFixedSize(64, 64)
+
+        title = QLabel(APP_TITLE)
+        title.setStyleSheet("font-size:26px; font-weight:800;")
+
+        left.addWidget(logo_lbl)
+        left.addSpacing(12)
+        left.addWidget(title)
+
+        header.addLayout(left)
+        header.addStretch(1)
+
+        # Sağ: menü butonları
         btn_students = QPushButton("Öğrenci Menüsü")
         btn_logs = QPushButton("Giriş-Çıkış Menüsü")
-        btn_students.clicked.connect(self.open_students); btn_logs.clicked.connect(self.open_logs)
-        header.addWidget(btn_students); header.addWidget(btn_logs)
+        btn_students.clicked.connect(self.open_students)
+        btn_logs.clicked.connect(self.open_logs)
+
+        header.addWidget(btn_students)
+        header.addWidget(btn_logs)
+
+        # --- header'ı yerleştir ---
+        root.addLayout(header)
+        root.addSpacing(12)  # Başlıkla listeler arasında boşluk, log’ları aşağı iter
+
 
         # Orta: üç liste (Giriş / Çıkış / Yasak)
         splitter = QSplitter(Qt.Horizontal)
         # Sol: Giriş
         left = QVBoxLayout(); leftw = QWidget(); leftw.setLayout(left)
-        ltitle = QLabel("Giren Öğrenciler (Son 10)"); ltitle.setStyleSheet("font-weight:600;")
+        ltitle = QLabel("Giren Öğrenciler"); ltitle.setStyleSheet("font-weight:600;")
         self.list_in = QListWidget()
         left.addWidget(ltitle); left.addWidget(self.list_in)
         # Orta: Çıkış
         mid = QVBoxLayout(); midw = QWidget(); midw.setLayout(mid)
-        mtitle = QLabel("Çıkan Öğrenciler (Son 10)"); mtitle.setStyleSheet("font-weight:600;")
+        mtitle = QLabel("Çıkan Öğrenciler"); mtitle.setStyleSheet("font-weight:600;")
         self.list_out = QListWidget()
         mid.addWidget(mtitle); mid.addWidget(self.list_out)
         # Sağ: Yasak
         right = QVBoxLayout(); rightw = QWidget(); rightw.setLayout(right)
-        rtitle = QLabel("Yasaklı Denemeler (Son 10)"); rtitle.setStyleSheet("font-weight:600;")
+        rtitle = QLabel("Yasaklı Denemeler"); rtitle.setStyleSheet("font-weight:600;")
         self.list_blocked = QListWidget()
         right.addWidget(rtitle); right.addWidget(self.list_blocked)
 
