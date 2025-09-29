@@ -58,7 +58,8 @@ class Database:
                     class TEXT NOT NULL,
                     card_id TEXT UNIQUE,
                     penalized INTEGER DEFAULT 0,
-                    student_type TEXT DEFAULT 'Evci'   -- 'Evci' veya 'Yurtçu'
+                    student_type TEXT DEFAULT 'Evci',   -- 'Evci' veya 'Yurtçu'
+                    is_personnel INTEGER DEFAULT 0     -- 0=öğrenci, 1=personel
                 )
             """)
             # logs
@@ -77,6 +78,8 @@ class Database:
                 cur.execute("ALTER TABLE students ADD COLUMN penalized INTEGER DEFAULT 0")
             if "student_type" not in cols:
                 cur.execute("ALTER TABLE students ADD COLUMN student_type TEXT DEFAULT 'Evci'")
+            if "is_personnel" not in cols:
+                cur.execute("ALTER TABLE students ADD COLUMN is_personnel INTEGER DEFAULT 0")
             # if card_id accidentally NOT NULL, make it NULLable (copy table)
             notnull = cols.get("card_id", (None,)*6)[3] if cols else 0
             if notnull == 1:
@@ -121,19 +124,19 @@ class Database:
             con.commit()
 
     # ---- Öğrenciler ----
-    def add_student(self, number, first_name, last_name, klass, card_id=None, penalized=0, student_type='Evci'):
+    def add_student(self, number, first_name, last_name, klass, card_id=None, penalized=0, student_type='Evci', is_personnel=0):
         with sqlite3.connect(self.path) as con:
             con.execute(
-                "INSERT INTO students(number, first_name, last_name, class, card_id, penalized, student_type) VALUES(?,?,?,?,?,?,?)",
-                (number, first_name, last_name, klass, card_id if card_id else None, int(penalized), student_type),
+                "INSERT INTO students(number, first_name, last_name, class, card_id, penalized, student_type, is_personnel) VALUES(?,?,?,?,?,?,?,?)",
+                (number, first_name, last_name, klass, card_id if card_id else None, int(penalized), student_type, int(is_personnel)),
             )
             con.commit()
 
     def bulk_add_students(self, rows):
-        # rows: (number, first, last, class, card_id_or_None, penalized, student_type)
+        # rows: (number, first, last, class, card_id_or_None, penalized, student_type, is_personnel)
         with sqlite3.connect(self.path) as con:
             con.executemany(
-                "INSERT OR REPLACE INTO students(number, first_name, last_name, class, card_id, penalized, student_type) VALUES(?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO students(number, first_name, last_name, class, card_id, penalized, student_type, is_personnel) VALUES(?,?,?,?,?,?,?,?)",
                 rows,
             )
             con.commit()
@@ -143,17 +146,17 @@ class Database:
             cur = con.cursor()
             cur.execute("""
                 SELECT number, first_name, last_name, class, card_id, COALESCE(penalized,0),
-                       COALESCE(student_type,'Evci')
+                       COALESCE(student_type,'Evci'), COALESCE(is_personnel,0)
                 FROM students ORDER BY number
             """)
             return cur.fetchall()
 
     def update_student_field(self, number, field, value):
-        assert field in ("number","first_name","last_name","class","card_id","penalized","student_type")
+        assert field in ("number","first_name","last_name","class","card_id","penalized","student_type","is_personnel")
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
-            if field == "penalized":
-                cur.execute("UPDATE students SET penalized=? WHERE number=?", (int(value), number))
+            if field in ("penalized", "is_personnel"):
+                cur.execute(f"UPDATE students SET {field}=? WHERE number=?", (int(value), number))
             elif field == "card_id":
                 cur.execute("UPDATE students SET card_id=? WHERE number=?", (value if value else None, number))
             else:
@@ -164,7 +167,7 @@ class Database:
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
             cur.execute("""
-                SELECT number, first_name, last_name, COALESCE(penalized,0), COALESCE(student_type,'Evci')
+                SELECT number, first_name, last_name, COALESCE(penalized,0), COALESCE(student_type,'Evci'), COALESCE(is_personnel,0)
                 FROM students WHERE card_id=?
             """, (card_id,))
             return cur.fetchone()
@@ -213,6 +216,42 @@ class Database:
         with sqlite3.connect(self.path) as con:
             cur = con.cursor()
             cur.execute("SELECT student_number, action, ts FROM logs WHERE substr(ts,1,10)=? ORDER BY ts ASC", (date_str,))
+            return cur.fetchall()
+
+    # ---- Personel fonksiyonları ----
+    def all_personnel(self):
+        with sqlite3.connect(self.path) as con:
+            cur = con.cursor()
+            cur.execute("""
+                SELECT number, first_name, last_name, class, card_id, COALESCE(penalized,0),
+                       COALESCE(student_type,'Evci'), COALESCE(is_personnel,0)
+                FROM students WHERE is_personnel=1 ORDER BY number
+            """)
+            return cur.fetchall()
+
+    def personnel_logs(self):
+        with sqlite3.connect(self.path) as con:
+            cur = con.cursor()
+            cur.execute("""
+                SELECT l.student_number, l.action, l.ts 
+                FROM logs l 
+                JOIN students s ON s.number = l.student_number 
+                WHERE s.is_personnel = 1 
+                ORDER BY l.ts DESC
+            """)
+            return cur.fetchall()
+
+    def last_n_student_logs(self, action, n=10):
+        """Sadece öğrenci logları (personel hariç)"""
+        with sqlite3.connect(self.path) as con:
+            cur = con.cursor()
+            cur.execute("""
+                SELECT l.student_number, l.action, l.ts 
+                FROM logs l 
+                JOIN students s ON s.number = l.student_number 
+                WHERE l.action=? AND s.is_personnel = 0 
+                ORDER BY l.ts DESC LIMIT ?
+            """, (action, n))
             return cur.fetchall()
 
     # ---- Market hours (profil bazlı) ----
@@ -313,6 +352,59 @@ class AddStudentDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Hata", str(e))
 
+# ===================== Personel Ekle =====================
+class AddPersonnelDialog(QDialog):
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Personel Ekle")
+        form = QFormLayout(self)
+
+        self.le_number = QLineEdit()
+        self.le_first  = QLineEdit()
+        self.le_last   = QLineEdit()
+        self.le_position = QLineEdit()  # Pozisyon/Bölüm
+        self.le_card   = QLineEdit()    # opsiyonel
+
+        form.addRow("Numarası (Benzersiz)", self.le_number)
+        form.addRow("Adı", self.le_first)
+        form.addRow("Soyadı", self.le_last)
+        form.addRow("Pozisyon/Bölüm", self.le_position)
+        form.addRow("Kart ID", self.le_card)
+
+        # RFID Enter'ı yut
+        self.le_card.installEventFilter(self); self.le_card.setFocus()
+
+        box = QHBoxLayout()
+        btn_cancel = QPushButton("Vazgeç"); btn_ok = QPushButton("Kaydet")
+        for b in (btn_ok, btn_cancel): b.setAutoDefault(False); b.setDefault(False)
+        btn_cancel.clicked.connect(self.reject); btn_ok.clicked.connect(self.save)
+        box.addStretch(1); box.addWidget(btn_cancel); box.addWidget(btn_ok)
+        form.addRow(box)
+
+    def eventFilter(self, obj, event):
+        if obj is self.le_card and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter): return True
+        return super().eventFilter(obj, event)
+
+    def save(self):
+        try:
+            number = self.le_number.text().strip()
+            first  = self.le_first.text().strip()
+            last   = self.le_last.text().strip()
+            position = self.le_position.text().strip()
+            card   = self.le_card.text().strip()
+            if not all([number, first, last, position, card]):
+                QMessageBox.warning(self, "Eksik", "Numara, Ad, Soyad, Pozisyon ve Kart ID zorunlu.")
+                return
+            self.db.add_student(number, first, last, position, card if card else None, 0, "Evci", 1)  # is_personnel=1
+            QMessageBox.information(self, "Tamam", "Personel eklendi.")
+            self.accept()
+        except sqlite3.IntegrityError as e:
+            QMessageBox.critical(self, "Hata", f"Benzersiz alan çakışması: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", str(e))
+
 # ===================== Öğrenci Menüsü =====================
 class StudentsModel(QStandardItemModel):
     HEADERS = ["Numara","Ad","Soyad","Sınıf","Kart ID","Cezalı","Tip"]
@@ -325,7 +417,10 @@ class StudentsModel(QStandardItemModel):
 
     def _load(self):
         self.setRowCount(0)
-        for number, first, last, klass, card, penalized, stype in self.db.all_students():
+        for number, first, last, klass, card, penalized, stype, is_personnel in self.db.all_students():
+            # Sadece öğrencileri göster (personel değil)
+            if is_personnel:
+                continue
             row = [
                 QStandardItem(str(number)),
                 QStandardItem(first),
@@ -441,12 +536,138 @@ class StudentMenuDialog(QDialog):
                 penal = 1 if str(penal).strip().lower() in ("1","true","evet","yes","✓","x") else 0
                 stype = str(r["Tip"]).strip() if "Tip" in df.columns and not pd.isna(r["Tip"]) else "Evci"
                 if stype not in ("Evci","Yurtçu"): stype = "Evci"
-                rows.append((num, first, last, klass, card, penal, stype))
+                rows.append((num, first, last, klass, card, penal, stype, 0))
             self.db.bulk_add_students(rows)
             QMessageBox.information(self, "Tamam", f"{len(rows)} öğrenci içe aktarıldı.")
             self.model._load()
         except Exception as e:
             QMessageBox.critical(self, "Hata", str(e))
+
+# ===================== Personel Menüsü =====================
+class PersonnelModel(QStandardItemModel):
+    HEADERS = ["Numara","Ad","Soyad","Pozisyon","Kart ID"]
+    def __init__(self, db: Database):
+        super().__init__()
+        self.db = db
+        self.setColumnCount(len(self.HEADERS))
+        self.setHorizontalHeaderLabels(self.HEADERS)
+        self._load()
+
+    def _load(self):
+        self.setRowCount(0)
+        for number, first, last, position, card, penalized, stype, is_personnel in self.db.all_personnel():
+            row = [
+                QStandardItem(str(number)),
+                QStandardItem(first),
+                QStandardItem(last),
+                QStandardItem(position),
+                QStandardItem("" if card is None else str(card)),
+            ]
+            for it in row:
+                it.setEditable(True)
+            self.appendRow(row)
+
+class PersonnelMenuDialog(QDialog):
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Personel Menüsü")
+        self.resize(900, 560)
+
+        v = QVBoxLayout(self)
+
+        # Üst: arama + butonlar
+        top = QHBoxLayout()
+        self.search = QLineEdit(); self.search.setPlaceholderText("Personel No ile ara…")
+        top.addWidget(self.search); top.addStretch(1)
+        self.btn_add = QToolButton(); self.btn_add.setText("Personel Ekle")
+        self.btn_export = QToolButton(); self.btn_export.setText("Personel Logları Excel İndir")
+        self.btn_add.setIcon(self.style().standardIcon(QStyle.SP_DialogYesButton))
+        self.btn_export.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.btn_add.clicked.connect(self.open_add)
+        self.btn_export.clicked.connect(self.export_personnel_logs)
+        top.addWidget(self.btn_add); top.addWidget(self.btn_export)
+
+        # Personel tablosu
+        self.model = PersonnelModel(self.db)
+        self.proxy = QSortFilterProxyModel(self); self.proxy.setSourceModel(self.model)
+        self.proxy.setFilterKeyColumn(0); self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+
+        self.table = QTableView(); self.table.setModel(self.proxy)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        # Personel logları
+        log_layout = QVBoxLayout()
+        log_layout.addWidget(QLabel("Personel Giriş-Çıkış Logları"))
+        self.log_table = QTableView()
+        self.log_table.setSortingEnabled(True)
+        self.refresh_logs()
+        
+        v.addLayout(top)
+        v.addWidget(self.table)
+        v.addLayout(log_layout)
+        v.addWidget(self.log_table)
+
+        self.search.textChanged.connect(self.proxy.setFilterFixedString)
+        self.model.itemChanged.connect(self._cell_changed)
+
+    def _cell_changed(self, item: QStandardItem):
+        try:
+            row = item.row()
+            number = self.model.item(row, 0).text().strip()
+            col = item.column()
+            if col == 0:
+                self.db.update_student_field(number, "number", item.text().strip())
+            elif col == 1:
+                self.db.update_student_field(number, "first_name", item.text().strip())
+            elif col == 2:
+                self.db.update_student_field(number, "last_name", item.text().strip())
+            elif col == 3:
+                self.db.update_student_field(number, "class", item.text().strip())
+            elif col == 4:
+                self.db.update_student_field(number, "card_id", item.text().strip())
+        except sqlite3.IntegrityError as e:
+            QMessageBox.critical(self, "Hata", f"Kayıt güncellenemedi: {e}")
+            self.model._load()
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", str(e))
+            self.model._load()
+
+    def open_add(self):
+        dlg = AddPersonnelDialog(self.db, self)
+        if dlg.exec(): 
+            self.model._load()
+            self.refresh_logs()
+
+    def refresh_logs(self):
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(["Numara","İşlem","Tarih-Saat"])
+        for number, action, ts in self.db.personnel_logs():
+            model.appendRow([QStandardItem(number), QStandardItem(action), QStandardItem(ts)])
+        self.log_table.setModel(model)
+
+    def export_personnel_logs(self):
+        if pd is None:
+            QMessageBox.critical(self, "Pandas Yok", "Excel dışa aktarma için pandas/openpyxl kurulmalı.")
+            return
+        
+        rows = self.db.personnel_logs()
+        if not rows:
+            QMessageBox.information(self, "Kayıt Yok", "Personel logları bulunamadı.")
+            return
+        
+        df = pd.DataFrame(rows, columns=["Numara","İşlem","Tarih-Saat"])
+        defname = f"personel_loglari_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "Personel Logları Excel olarak kaydet", defname, "Excel (*.xlsx)")
+        if save_path:
+            try:
+                df.to_excel(save_path, index=False)
+                QMessageBox.information(self, "Başarılı", f"Personel logları Excel kaydedildi:\n{save_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", str(e))
 
 # ===================== Market Hours Dialog (Evci/Yurtçu) =====================
 DAYS_TR = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
@@ -680,10 +901,11 @@ class MainWindow(QMainWindow):
         header.addLayout(left)
         header.addStretch(1)
 
+        btn_personnel = QPushButton("Personel Menüsü")
         btn_students = QPushButton("Öğrenci Menüsü")
         btn_logs = QPushButton("Giriş-Çıkış Menüsü")
-        btn_students.clicked.connect(self.open_students); btn_logs.clicked.connect(self.open_logs)
-        header.addWidget(btn_students); header.addWidget(btn_logs)
+        btn_personnel.clicked.connect(self.open_personnel); btn_students.clicked.connect(self.open_students); btn_logs.clicked.connect(self.open_logs)
+        header.addWidget(btn_personnel); header.addWidget(btn_students); header.addWidget(btn_logs)
 
         root.addLayout(header)
         root.addSpacing(12)  # başlıkla listeler arası boşluk
@@ -727,24 +949,24 @@ class MainWindow(QMainWindow):
     # ----- Listeleri yenile -----
     def refresh_lists(self):
         self.list_in.clear(); self.list_out.clear(); self.list_blocked.clear()
-        # Girişler
-        for idx, (number, action, ts) in enumerate(self.db.last_n_logs("Giriş", 10)):
+        # Girişler (sadece öğrenciler)
+        for idx, (number, action, ts) in enumerate(self.db.last_n_student_logs("Giriş", 10)):
             name = self._name_of(number)
             item = QListWidgetItem()
             highlight = (self._last_scanned == (number, "Giriş")) and (idx == 0) and self.db.get_penalized(number)
             widget = PersonItem(number, name, ts, large=(idx==0), highlight_red=bool(highlight))
             item.setSizeHint(widget.sizeHint())
             self.list_in.addItem(item); self.list_in.setItemWidget(item, widget)
-        # Çıkışlar
-        for idx, (number, action, ts) in enumerate(self.db.last_n_logs("Çıkış", 10)):
+        # Çıkışlar (sadece öğrenciler)
+        for idx, (number, action, ts) in enumerate(self.db.last_n_student_logs("Çıkış", 10)):
             name = self._name_of(number)
             item = QListWidgetItem()
             highlight = (self._last_scanned == (number, "Çıkış")) and (idx == 0) and self.db.get_penalized(number)
             widget = PersonItem(number, name, ts, large=(idx==0), highlight_red=bool(highlight))
             item.setSizeHint(widget.sizeHint())
             self.list_out.addItem(item); self.list_out.setItemWidget(item, widget)
-        # Yasaklılar (son yasaklı büyük satır kırmızı)
-        for idx, (number, action, ts) in enumerate(self.db.last_n_logs("Yasak", 10)):
+        # Yasaklılar (sadece öğrenciler)
+        for idx, (number, action, ts) in enumerate(self.db.last_n_student_logs("Yasak", 10)):
             name = self._name_of(number)
             item = QListWidgetItem()
             highlight = (self._last_scanned == (number, "Yasak")) and (idx == 0)
@@ -796,9 +1018,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Hata", f"Kart atanamadı: {e}")
             return
 
-        number, first, last, penalized, stype = stu
+        number, first, last, penalized, stype, is_personnel = stu
 
-        # Çarşı saat kontrolü (profil: Evci/Yurtçu)
+        # Personel ise sadece log tut, ekranda gösterme
+        if is_personnel:
+            last_action = self.db.last_action_for_student(number)
+            next_action = "Çıkış" if last_action == "Giriş" else "Giriş"
+            ts = self.db.add_log(number, next_action)
+            self.statusBar().showMessage(f"Personel {first} {last} için {next_action} kaydedildi ({ts}).", 3000)
+            return
+
+        # Öğrenci işlemleri: Çarşı saat kontrolü (profil: Evci/Yurtçu)
         within = self._is_within_market_hours(stype)
         if not within:
             ts = self.db.add_log(number, "Yasak")
@@ -819,6 +1049,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{first} {last} için {next_action} kaydedildi ({ts}).", 5000)
         self.refresh_lists()
 
+    def open_personnel(self):
+        PersonnelMenuDialog(self.db, self).exec()
+        
     def open_students(self):
         StudentMenuDialog(self.db, self).exec()
         self.refresh_lists()
