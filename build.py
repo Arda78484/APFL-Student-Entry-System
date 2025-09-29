@@ -10,11 +10,28 @@ def find(entry):
     print("Hata: Entry (giriş) dosyası bulunamadı.")
     sys.exit(1)
 
-def run(cmd):
+def run(cmd, suppress_warnings=True):
     print("\n> " + " ".join(cmd))
-    r = subprocess.run(cmd)
-    if r.returncode != 0:
-        sys.exit(r.returncode)
+    if suppress_warnings:
+        # PyInstaller çıktısını filtrele - bilinen uyarıları gizle
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                                 universal_newlines=True, bufsize=1)
+        
+        for line in process.stdout:
+            # PySide6 project_lib uyarısını gizle (zararsız)
+            if "project_lib" in line and "ModuleNotFoundError" in line:
+                continue
+            if "Failed to collect submodules for 'PySide6.scripts.deploy_lib'" in line:
+                continue
+            print(line, end='')
+        
+        process.wait()
+        if process.returncode != 0:
+            sys.exit(process.returncode)
+    else:
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            sys.exit(r.returncode)
 
 def main():
     parser = argparse.ArgumentParser(description="Okul Kart Sistemi - Build")
@@ -23,6 +40,7 @@ def main():
     parser.add_argument("--console", action="store_true", help="Konsol penceresini açık bırak")
     parser.add_argument("--clean", action="store_true", help="Önce build/dist temizle")
     parser.add_argument("--icon", default="", help="İkon dosyası (ico/ico, icns, png)")
+    parser.add_argument("--verbose", action="store_true", help="Tüm PyInstaller çıktısını göster")
     args = parser.parse_args()
 
     entry = find(args.entry)
@@ -48,6 +66,10 @@ def main():
         "--name", args.name,
         # PySide6 tüm kaynak/binary’leri topla (plugin, qml, imageformats vs.)
         "--collect-all", "PySide6",
+        # Diğer Qt binding'lerini hariç tut (çakışma önlemi)
+        "--exclude-module", "PyQt5", 
+        "--exclude-module", "PyQt6", 
+        "--exclude-module", "tkinter",
     ]
 
     # GUI uygulaması: konsol açma
@@ -55,21 +77,24 @@ def main():
         cmd.append("--windowed")
 
     # İkon (varsa)
-    if args.icon:
+    if args.icon and os.path.isfile(args.icon):
         cmd.extend(["--icon", args.icon])
+        print(f"İkon kullaniliyor: {args.icon}")
+    elif args.icon:
+        print(f"Uyari: İkon dosyasi bulunamadi: {args.icon}")
 
     # Giriş dosyası
     cmd.append(entry)
 
-    run(cmd)
+    run(cmd, suppress_warnings=not args.verbose)
 
     exe = os.path.join("dist", args.name + (".exe" if os.name == "nt" else ""))
-    print("\n✅ Bitti!")
-    print(f"Çıktı: {exe}")
+    print("\n[OK] Bitti!")
+    print(f"Cikti: {exe}")
     print("\nNotlar:")
-    print("- İlk çalıştırmada 'data/' ve 'photos/' klasörleri exe’nin yanında otomatik oluşur.")
-    print("- Fotoğrafları 'photos/OGRENCINO.jpg' olarak koymalısın.")
-    print("- Windows için Windows’ta, Linux için Linux’ta build al. (PyInstaller çapraz derleme yapmaz.)")
+    print("- Ilk calistirmada 'data/' ve 'photos/' klasorleri exe'nin yaninda otomatik olusur.")
+    print("- Fotograflari 'photos/OGRENCINO.jpg' olarak koymalisin.")
+    print("- Windows icin Windows'ta, Linux icin Linux'ta build al. (PyInstaller capraz derleme yapmaz.)")
 
 if __name__ == "__main__":
     main()

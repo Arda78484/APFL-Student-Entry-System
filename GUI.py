@@ -15,7 +15,7 @@ import os, sys, sqlite3
 from datetime import datetime, time
 
 from PySide6.QtCore import Qt, QTimer, QDate, QEvent, QSortFilterProxyModel
-from PySide6.QtGui import QPixmap, QStandardItemModel, QStandardItem
+from PySide6.QtGui import QPixmap, QStandardItemModel, QStandardItem, QTransform
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
     QSplitter, QListWidget, QListWidgetItem, QLineEdit, QMessageBox, QDialog, QFormLayout,
@@ -28,6 +28,13 @@ try:
     import pandas as pd
 except Exception:
     pd = None
+
+# PIL/Pillow for EXIF handling
+try:
+    from PIL import Image, ExifTags
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 APP_TITLE = "Ankara Pursaklar Fen Lisesi - Okul Giriş Çıkış Kart Sistemi"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -280,11 +287,7 @@ class PersonItem(QWidget):
         self.setStyleSheet(border)
 
         pic = QLabel(); pic.setFixedSize(pic_size, pic_size)
-        pm = QPixmap(os.path.join(PHOTOS_DIR, f"{number}.jpg"))
-        if pm.isNull():
-            pm = QPixmap(pic_size, pic_size); pm.fill(Qt.lightGray)
-        else:
-            pm = pm.scaled(pic_size, pic_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = self._load_image_with_rotation(os.path.join(PHOTOS_DIR, f"{number}.jpg"), pic_size)
         pic.setPixmap(pm)
 
         v = QVBoxLayout()
@@ -293,6 +296,29 @@ class PersonItem(QWidget):
         v.addWidget(name); v.addWidget(ts)
 
         h.addWidget(pic); h.addLayout(v)
+
+    def _load_image_with_rotation(self, image_path, size):
+        """Load image and apply rotation for common orientations"""
+        if not os.path.exists(image_path):
+            pm = QPixmap(size, size)
+            pm.fill(Qt.lightGray)
+            return pm
+
+        pm = QPixmap(image_path)
+        if pm.isNull():
+            pm = QPixmap(size, size)
+            pm.fill(Qt.lightGray)
+            return pm
+
+        # Check if image needs rotation (simple heuristic for 3000x4000 images)
+        if pm.width() > pm.height() and pm.width() >= 3000:
+            # Likely a rotated portrait image, rotate 90 degrees clockwise
+            transform = QTransform()
+            transform.rotate(90)
+            pm = pm.transformed(transform)
+
+        pm = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return pm
 
 # ===================== Öğrenci Ekle =====================
 class AddStudentDialog(QDialog):
@@ -1006,6 +1032,51 @@ class MainWindow(QMainWindow):
         card = self.rfid_input.text().strip(); self.rfid_input.clear()
         if not card: return
         stu = self.db.find_student_by_card(card)
+        if not stu:
+            # Kart tanımsız: öğrenci numarasına ata
+            num, ok = QInputDialog.getText(self, "Kart Atama", "Bu kart tanımsız.\nKartı atamak için öğrenci numarasını girin:")
+            num = (num or "").strip()
+            if not (ok and num): return
+            try:
+                self.db.update_student_field(num, "card_id", card)
+                QMessageBox.information(self, "Kart Atandı", f"Kart {num} numaralı öğrenciye atandı.")
+            except sqlite3.IntegrityError as e:
+                QMessageBox.critical(self, "Hata", f"Kart atanamadı: {e}")
+            return
+
+        number, first, last, penalized, stype, is_personnel = stu
+
+        # Personel ise sadece log tut, ekranda gösterme
+        if is_personnel:
+            last_action = self.db.last_action_for_student(number)
+            next_action = "Çıkış" if last_action == "Giriş" else "Giriş"
+            ts = self.db.add_log(number, next_action)
+            self.statusBar().showMessage(f"Personel {first} {last} için {next_action} kaydedildi ({ts}).", 3000)
+            return
+
+        # Öğrenci işlemleri: Çarşı saat kontrolü (profil: Evci/Yurtçu)
+        within = self._is_within_market_hours(stype)
+        if not within:
+            ts = self.db.add_log(number, "Yasak")
+            self._last_scanned = (number, "Yasak")
+            if int(penalized):
+                self._beep_n_times(4, 180)
+            self.statusBar().showMessage(f"{first} {last} için YASAK deneme ({ts}).", 5000)
+            self.refresh_lists()
+            return
+
+        # Saat içi => normal toggle
+        last_action = self.db.last_action_for_student(number)
+        next_action = "Çıkış" if last_action == "Giriş" else "Giriş"
+        ts = self.db.add_log(number, next_action)
+        self._last_scanned = (number, next_action)
+        if int(penalized):
+            self._beep_n_times(4, 180)
+        self.statusBar().showMessage(f"{first} {last} için {next_action} kaydedildi ({ts}).", 5000)
+        self.refresh_lists()
+
+    def open_personnel(self):
+        PersonnelMenuDialog(self.db, self).exec()
         if not stu:
             # Kart tanımsız: öğrenci numarasına ata
             num, ok = QInputDialog.getText(self, "Kart Atama", "Bu kart tanımsız.\nKartı atamak için öğrenci numarasını girin:")
